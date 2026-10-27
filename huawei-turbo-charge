@@ -1,0 +1,186 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# huawei-turbo-charge: switch Huawei "Turbo charge" on or off from Linux.
+#
+# Huawei PC Manager exposes a "Turbo charge" option that lifts the embedded
+# controller's default charge-current cap. Linux has no driver for it, but the
+# firmware reaches it through the WMI method GI2C (MFID 0x02, SFID 0x10), which
+# forwards raw commands to the EC. Turbo charge is EC command 0x02D3 with two
+# data bytes {operation, value}:
+#
+#   {00, 00}  query support        -> out[2] == 1 when supported
+#   {00, 01}  read switch          -> out[2] == 1 when on
+#   {01, 00}  switch off           -> out[0] == 0 on success
+#   {01, 01}  switch on            -> out[0] == 0 on success
+#
+# The EC clears the switch a few seconds after the charger is unplugged, so it
+# has to be re-applied on every plug-in (see the udev rule and systemd unit).
+#
+# The commands are sent through the huawei-wmi debugfs interface, which needs
+# root: write a u64 to "arg" (little-endian bytes: MFID, SFID, then the
+# arguments), then read "call".
+#
+# Usage: huawei-turbo-charge {on|off|status|apply}
+
+set -u
+
+DEBUGFS_DIR=${HUAWEI_WMI_DEBUGFS:-/sys/kernel/debug/huawei-wmi}
+POWER_SUPPLY_DIR=${HUAWEI_POWER_SUPPLY_DIR:-/sys/class/power_supply}
+LOCK_FILE=${HUAWEI_TURBO_LOCK:-/run/huawei-turbo-charge.lock}
+RETRIES=${TURBO_RETRIES:-5}
+RETRY_DELAY=${TURBO_RETRY_DELAY:-2}
+SETTLE_DELAY=${TURBO_SETTLE_DELAY:-1}
+
+# Bytes: 02 10 | 02 D3 (EC command) | 02 (data length) | operation | value | 00
+readonly ARG_SUPPORT=0x00000002d3021002
+readonly ARG_STATUS=0x00010002d3021002
+readonly ARG_ON=0x00010102d3021002
+readonly ARG_OFF=0x00000102d3021002
+
+# `call` prints "[{4-byte WMI header},{256-byte buffer}]"; buffer byte 0 is the
+# EC status (0 = success).
+readonly HEADER_BYTES=4
+
+log() { printf 'huawei-turbo-charge: %s\n' "$*" >&2; }
+die() {
+  log "$*"
+  exit 1
+}
+
+# out_byte N RAW: print byte N of the output buffer as a decimal number.
+out_byte() {
+  local n=$1 raw=$2
+  local -a bytes
+  raw=${raw//[\[\]\{\}[:space:]]/}
+  IFS=, read -r -a bytes <<<"$raw"
+  local idx=$((HEADER_BYTES + n))
+  ((${#bytes[@]} > idx)) || return 1
+  local value=${bytes[idx]}
+  [[ $value =~ ^0x[0-9a-fA-F]{1,2}$ ]] || return 1
+  printf '%d\n' "$((value))"
+}
+
+wmi_call() {
+  printf '%s\n' "$1" >"$DEBUGFS_DIR/arg" 2>/dev/null || return 1
+  cat "$DEBUGFS_DIR/call" 2>/dev/null
+}
+
+# True when any mains or USB supply reports online=1 (same rule Omarchy uses).
+ac_online() {
+  local supply type
+  for supply in "$POWER_SUPPLY_DIR"/*; do
+    [[ -r $supply/online && -r $supply/type ]] || continue
+    type=$(<"$supply/type")
+    [[ $type == Mains || $type == USB ]] || continue
+    [[ $(<"$supply/online") == 1 ]] && return 0
+  done
+  return 1
+}
+
+is_supported() {
+  local raw
+  raw=$(wmi_call "$ARG_SUPPORT") || return 1
+  [[ $(out_byte 0 "$raw") == 0 && $(out_byte 2 "$raw") == 1 ]]
+}
+
+# switch_state: print 1 when Turbo charge is on, 0 when off.
+switch_state() {
+  local raw
+  raw=$(wmi_call "$ARG_STATUS") || return 1
+  [[ $(out_byte 0 "$raw") == 0 ]] || return 1
+  out_byte 2 "$raw"
+}
+
+# set_switch on|off: write the switch and confirm it by reading it back.
+set_switch() {
+  local want=0 arg=$ARG_OFF attempt raw
+  if [[ $1 == on ]]; then
+    want=1
+    arg=$ARG_ON
+  fi
+  for ((attempt = 1; attempt <= RETRIES; attempt++)); do
+    raw=$(wmi_call "$arg") || return 1
+    if [[ $(out_byte 0 "$raw") == 0 && $(switch_state) == "$want" ]]; then
+      return 0
+    fi
+    ((attempt < RETRIES)) && sleep "$RETRY_DELAY"
+  done
+  return 1
+}
+
+cmd_set() {
+  is_supported || {
+    log "Turbo charge is not supported by this firmware"
+    return 1
+  }
+  set_switch "$1" || {
+    log "could not switch Turbo charge $1"
+    return 1
+  }
+  log "Turbo charge $1"
+}
+
+# apply: enable Turbo charge when on AC; a quiet no-op everywhere else, so it
+# is safe to run from boot, resume and plug-in hooks on any machine.
+cmd_apply() {
+  ac_online || return 0
+  is_supported || {
+    log "Turbo charge is not supported by this firmware; nothing to do"
+    return 0
+  }
+  set_switch on || {
+    log "could not enable Turbo charge"
+    return 1
+  }
+  log "Turbo charge on"
+}
+
+cmd_status() {
+  local supported=no state=unknown ac=offline
+  is_supported && supported=yes
+  if [[ $supported == yes ]]; then
+    case $(switch_state) in
+      1) state=on ;;
+      0) state=off ;;
+    esac
+  fi
+  ac_online && ac=online
+  printf 'supported: %s\nturbo charge: %s\ncharger: %s\n' "$supported" "$state" "$ac"
+}
+
+ensure_debugfs() {
+  [[ -w $DEBUGFS_DIR/arg ]] && return 0
+  if ! mountpoint -q /sys/kernel/debug; then
+    mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null
+  fi
+  [[ -w $DEBUGFS_DIR/arg ]] ||
+    die "$DEBUGFS_DIR is unavailable: is the huawei_wmi module loaded, and debugfs enabled (not blocked by kernel lockdown)?"
+}
+
+main() {
+  local command=${1:-}
+  case $command in
+    on | off | status | apply) ;;
+    *)
+      printf 'Usage: %s {on|off|status|apply}\n' "${0##*/}" >&2
+      return 2
+      ;;
+  esac
+  ((EUID == 0)) || die "must run as root (debugfs is root-only)"
+  ensure_debugfs
+  exec 9>"$LOCK_FILE"
+  flock -w 30 9 || die "another instance is running"
+  case $command in
+    on | off) cmd_set "$command" ;;
+    status) cmd_status ;;
+    apply)
+      sleep "$SETTLE_DELAY"
+      cmd_apply
+      ;;
+  esac
+}
+
+# Sourcing for tests (HUAWEI_TURBO_SOURCE_ONLY=1) must not run anything.
+if [[ -z ${HUAWEI_TURBO_SOURCE_ONLY:-} ]]; then
+  main "$@"
+fi
