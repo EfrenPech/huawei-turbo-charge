@@ -1,0 +1,63 @@
+name: Compatibility report
+description: Tell us whether huawei-turbo-charge works on your Huawei or Honor laptop
+title: "[report] <model>: works / does not work / unsupported"
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. "Unsupported" is a useful result too.
+        Please do not paste serial numbers or other personal data.
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model
+      description: Output of `cat /sys/class/dmi/id/product_name` and `cat /sys/class/dmi/id/sys_vendor`
+      placeholder: "VGHH-XX / HUAWEI"
+    validations:
+      required: true
+  - type: input
+    id: bios
+    attributes:
+      label: BIOS version
+      description: Output of `cat /sys/class/dmi/id/bios_version`
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel and distribution
+      description: Output of `uname -r`, plus your distribution
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `sudo huawei-turbo-charge status`
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works, charging is clearly faster
+        - Switch turns on, but charging speed did not change
+        - Reports "supported: no"
+        - Error or unexpected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: Charge power with the switch off and on (optional)
+      description: |
+        Same charger and similar battery level. For example, read
+        `/sys/class/power_supply/BAT0/power_now` for a minute in each state.
+      placeholder: "off: about 6 W, on: about 25 W"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Charger model and wattage, errors from `journalctl -u huawei-turbo-charge`, etc.
