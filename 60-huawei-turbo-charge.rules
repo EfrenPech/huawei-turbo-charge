@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Re-enable Huawei Turbo charge whenever a charger is connected: the embedded
+# controller clears the switch a few seconds after the charger is unplugged.
+SUBSYSTEM=="power_supply", ATTR{type}=="Mains", ATTR{online}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="huawei-turbo-charge.service"
+SUBSYSTEM=="power_supply", ATTR{type}=="USB", ATTR{online}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="huawei-turbo-charge.service"

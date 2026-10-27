@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+[Unit]
+Description=Enable Huawei Turbo charge when a charger is connected
+Documentation=https://github.com/torvalds/linux/blob/master/drivers/platform/x86/huawei-wmi.c
+ConditionPathExists=/sys/devices/platform/huawei-wmi
+After=local-fs.target sys-kernel-debug.mount
+# Ordering only matters for the sleep targets below: it makes the unit run after
+# resume instead of before suspend.
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=@BINDIR@/huawei-turbo-charge apply
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
