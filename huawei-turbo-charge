@@ -15,6 +15,10 @@
 #
 # The EC clears the switch a few seconds after the charger is unplugged, so it
 # has to be re-applied on every plug-in (see the udev rule and systemd unit).
+# The unit also runs after a resume, where the AC adapter can still report
+# itself offline for a while even with the charger connected. The EC knows the
+# charger state better than the adapter does, so apply asks the EC instead of
+# the adapter.
 #
 # The commands are sent through the huawei-wmi debugfs interface, which needs
 # root: write a u64 to "arg" (little-endian bytes: MFID, SFID, then the
@@ -120,19 +124,28 @@ cmd_set() {
   log "Turbo charge $1"
 }
 
-# apply: enable Turbo charge when on AC; a quiet no-op everywhere else, so it
-# is safe to run from boot, resume and plug-in hooks on any machine.
+# apply: enable Turbo charge; a quiet no-op on firmware without the feature
+# and when no charger is connected, so it is safe to run from boot, resume and
+# plug-in hooks on any machine.
 cmd_apply() {
-  ac_online || return 0
   is_supported || {
     log "Turbo charge is not supported by this firmware; nothing to do"
     return 0
   }
-  set_switch on || {
-    log "could not enable Turbo charge"
-    return 1
+  if set_switch on; then
+    log "Turbo charge on"
+    return 0
+  fi
+  # The write did not take. Without a charger the EC has nothing to switch,
+  # and that is not an error. The adapter is only consulted here, to tell a
+  # missing charger from a real failure: right after a resume it can report
+  # itself offline even with the charger connected.
+  ac_online || {
+    log "no charger connected; nothing to do"
+    return 0
   }
-  log "Turbo charge on"
+  log "could not enable Turbo charge"
+  return 1
 }
 
 cmd_status() {

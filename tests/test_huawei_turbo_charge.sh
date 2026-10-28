@@ -58,7 +58,7 @@ check "disable argument" 0x00000102d3021002 "$ARG_OFF"
 # state in files rather than in variables.
 state=$(mktemp -d)
 trap 'rm -rf "$state"' EXIT
-AC=1
+AC=1        # 1 while the adapter reports a charger
 
 wmi_call() { # records every call, replays queued responses in order
   printf '%s\n' "$1" >>"$state/calls"
@@ -79,13 +79,6 @@ queue() { printf '%s\n' "$@" >>"$state/responses"; }
 calls() { tr '\n' ' ' <"$state/calls" | sed 's/ $//'; }
 call_count() { wc -l <"$state/calls" | tr -d ' '; }
 
-# AC unplugged: apply must not touch the hardware at all.
-reset
-AC=0
-cmd_apply >/dev/null 2>&1
-check "apply is a no-op on battery (exit)" 0 "$?"
-check "apply is a no-op on battery (no calls)" 0 "$(call_count)"
-
 # Unsupported/shielded firmware: apply must never write.
 reset
 queue "$SHIELDED"
@@ -100,6 +93,30 @@ cmd_apply >/dev/null 2>&1
 check "apply succeeds when the switch reads back ON" 0 "$?"
 check "apply call sequence: support, write, verify" \
   "$ARG_SUPPORT $ARG_ON $ARG_STATUS" "$(calls)"
+
+# After a resume the adapter still reports itself offline even with the
+# charger connected, and the EC has already dropped the switch by then: the
+# EC decides, so the switch has to be written all the same.
+reset
+AC=0
+queue "$SUPPORTED" "$SWITCH_OFF" "$SWITCH_ON"
+cmd_apply >/dev/null 2>&1
+check "apply writes the switch even when the adapter reports offline" 0 "$?"
+check "apply asks the EC, not the adapter, after a resume" \
+  "$ARG_SUPPORT $ARG_ON $ARG_STATUS" "$(calls)"
+
+# The EC refuses the write and no charger is connected: nothing to do.
+reset
+AC=0
+queue "$SUPPORTED"
+cmd_apply >/dev/null 2>&1
+check "apply is a no-op when the EC refuses and no charger is connected" 0 "$?"
+
+# The EC refuses the write with a charger connected: a real failure.
+reset
+queue "$SUPPORTED"
+cmd_apply >/dev/null 2>&1
+check "apply fails when the EC refuses with a charger connected" 1 "$?"
 
 # Supported, EC needs a retry before the switch sticks.
 reset

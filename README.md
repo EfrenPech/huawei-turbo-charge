@@ -33,7 +33,13 @@ sudo huawei-turbo-charge on
 sudo huawei-turbo-charge off
 ```
 
-You normally do not run it by hand. The embedded controller (EC) clears the switch a few seconds after the charger is unplugged, so the installed udev rule re-enables it on every plug-in (verified on hardware: about one second after the charger is connected). The systemd unit also runs at boot and after resume; those two triggers are configured but not yet verified. On a laptop that does not support the feature they do nothing.
+You normally do not run it by hand. The embedded controller (EC) clears the switch a few seconds after the charger is unplugged, so the installed udev rule re-enables it on every plug-in (verified on hardware: about one second after the charger is connected). The systemd unit also runs at boot and after resume (both verified on hardware on 2026-10-28). On a laptop that does not support the feature they do nothing.
+
+## After a resume
+
+Right after a resume the AC adapter can keep reporting itself offline even though the charger is connected, and the EC has already dropped the switch by then. An earlier version asked the adapter first and gave up silently, so Turbo charge stayed off until the charger was unplugged and plugged in again (observed on a MateBook X Pro 2024 after an `s2idle` resume, 2026-10-28).
+
+`apply` now asks the EC directly: the EC knows whether a charger is connected, the adapter does not always know. The adapter is only consulted when a write fails, to tell a missing charger from a real failure.
 
 ## How it works
 
